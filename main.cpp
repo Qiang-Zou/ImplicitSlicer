@@ -6,7 +6,7 @@
 #include <dirent.h>
 #else
 #include <GL/glew.h>
-#include <GL/glaux.h>
+#include <GL/GLAux.h>
 #include <GL/glut.h>
 #include <io.h>
 #endif
@@ -28,7 +28,7 @@
 #include "MeshWorksDataBoard.h"
 
 #include "LatticeModeler.h"
-
+#include "call_cuda.h"
 using namespace  std;
 
 #define _MENU_QUIT						10001
@@ -70,7 +70,7 @@ int _pMainWnd;
 extern void menuEvent(int idCommand);
 
 //#if defined (__APPLE__)
-//#define CCL_DEFAULT_FOLDER_LOCATION     "../Data/"
+//#define CCL_DEFAULT_FOLDER_LOCATION     "Data/"
 //#else
 //#define CCL_DEFAULT_FOLDER_LOCATION     "D:\\data\\lattice\\Data\\"
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -84,7 +84,7 @@ extern void menuEvent(int idCommand);
 /////////////////////////////////////////////////////////////////////////////////////////////////
 //#endif
 
-#define DEFAULT_FOLDER_LOCATION     "../../Data/"
+#define DEFAULT_FOLDER_LOCATION     "Data/"
 
 #if defined (__APPLE__)
 #define GET_REAL_PATH(X) realpath((X))     

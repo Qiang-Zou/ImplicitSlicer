@@ -78,6 +78,10 @@ public:
 
     void save2Pic(std::vector<std::vector<double>> &digitImage, std::string path, int dpi);
 
+	// g-code utilities
+	bool writeCLIFile(std::string path, std::vector<std::shared_ptr<QMeshPatch>>& layers);
+	bool writeCLIFileBin(string path, std::vector<std::shared_ptr<QMeshPatch> > &layers);
+
 private:
     std::string surfaceMeshFilePath;
     std::string volumeMeshFilePath;
@@ -86,6 +90,7 @@ private:
     double avgLength;
     double m_radiusConvol;
     double m_thresholdConvol;
+	std::vector<std::shared_ptr<QMeshPatch>> layers;
 };
 
 

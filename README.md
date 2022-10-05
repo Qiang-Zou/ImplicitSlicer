@@ -29,12 +29,11 @@ It can be compiled with QT 5.10+MSVC 14.0, and run on the operating system Windo
   webpage: https://github.com/Qiang-Zou/ImplicitSlicer/
 
 
-3.Installing & Compiling (Windows+QT5.10+MSVS14.0)
+3.Installing & Compiling (Windows+QT5.10+MSVS14.0+CUDA10.2)
 -------------------------------------------
 
 - Simply download the source code to a suitable place, add Eigen Library to the root directory, and use QT5.10+MSVC14.0 to build the project.
-
-
+- Also, Cuda is used in this project, so please make sure you have set up this library before using this code.
 
 4.Usage
 -------
