@@ -1,6 +1,6 @@
 # Implicit and Direct Slicer for Lattice Structures (ImplicitSlicer)
 
-- By: Qiang Zou (built on top of Charlie C. L. Wang's MeshWorks)
+- By: Qiang Zou and Sifan Chen (built on top of Charlie C. L. Wang's MeshWorks)
 -  email: qzou.code@gmail.com
 - webpage: https://qiang-zou.github.io/
 - Latest Release: 2020
@@ -18,7 +18,7 @@ It can be compiled with QT 5.10+MSVC 14.0, and run on the operating system Windo
 1.Copyright
 -----------
 
-- ImplicitSlicer is developed by Qiang Zou based on [1-3] for research use. All rights about the program (esp. surface reconstruction) are reserved by Qiang Zou. This C++ source codes are available only to a primary user for academic purposes. No secondary use, such as copy, distribution, diversion, business purpose, etc., is allowed. In no event shall the author be liable to any party for direct, indirect, special, incidental, or consequential damage arising out of the use of this program. ImplicitSlicer is self-contained. 
+- ImplicitSlicer is developed by Qiang Zou, and now maintained by Sifan Chen, based on [1-4] for research use. All rights about the program (esp. surface reconstruction) are reserved by Qiang Zou. This C++ source codes are available only to a primary user for academic purposes. No secondary use, such as copy, distribution, diversion, business purpose, etc., is allowed. In no event shall the author be liable to any party for direct, indirect, special, incidental, or consequential damage arising out of the use of this program. ImplicitSlicer is self-contained. 
 
 
 2.Download
@@ -68,7 +68,7 @@ It can be compiled with QT 5.10+MSVC 14.0, and run on the operating system Windo
 
 6.References
 -------------
-- [1] Pu Huang, Charlie C.L. Wang, and Yong Chen, "Intersection-free and topologically faithful slicing of implicit solid", ASME Transactions - Journal of Computing and Information Science in Engineering, vol.13, no.2, 021009 (13 pages), June 2013.
-- [2] Shengjun Liu, Tao Liu, Qiang Zou, Weiming Wang, Eugeni L. Doubrovski, and Charlie C.L. Wang, "Memory-efficient modeling and slicing of large-scale adaptive lattice structures", ASME Transactions - Journal of Computing and Information Science in Engineering, Accepted.
-- [3] Junhao Ding, Qiang Zou, Shuo Qu, Paulo Bartolo, Xu Song, Charlie C. L. Wang, A new digital design and manufacturing paradigm for high precision powder bed fusion process. Under Review.
-
+- [1] Pu Huang, Charlie C.L. Wang, and Yong Chen, Intersection-free and topologically faithful slicing of implicit solid, ASME Transactions - Journal of Computing and Information Science in Engineering, vol.13, no.2, 021009 (13 pages), June 2013.
+- [2] Pu Huang, Charlie C.L. Wang, and Yong Chen, Algorithms for layered manufacturing in image space, Book Chapter, ASME Advances in Computers and Information in Engineering Research, vol.1, pp.377-410, August 2014.
+- [3] Shengjun Liu, Tao Liu, Qiang Zou, Weiming Wang, Eugeni L. Doubrovski, and Charlie C.L. Wang, "Memory-efficient modeling and slicing of large-scale adaptive lattice structures", ASME Transactions - Journal of Computing and Information Science in Engineering, vol.21, no.6, 061003 (16 pages), May 2021.
+- [4] Junhao Ding, Qiang Zou, Shuo Qu, Paulo Bartolo, Xu Song, Charlie C. L. Wang, STL-free design and manufacturing paradigm for high-precision powder bed fusion. CIRP Annals 70.1 (2021): 167-170.
