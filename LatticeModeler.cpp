@@ -18,6 +18,20 @@
 #include <vector>
 #include <experimental/unordered_map>
 
+#include <thrust/device_vector.h>
+#include <thrust/scan.h>
+#include <thrust/sort.h>
+#include <thrust/remove.h>
+#include <thrust/sequence.h>
+#include <thrust/fill.h>
+#include <thrust/count.h>
+#include <thrust/functional.h>
+#include <thrust/sequence.h>
+#include <thrust/iterator/reverse_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
+#include <thrust/unique.h>
+#include <cstdlib>
+
 #include <QImage>
 #include "cuda.h"
 #include "cuda_runtime.h"
@@ -26,6 +40,7 @@
 #include "LDNIcudaOperation.h"
 #include "LDNIcudaSolid.h"
 #include "call_cuda.h"
+#define BLOCKSIZE	64
 bool LatticeGraph::addEdge(size_t idxStart, size_t idxEnd, double weight)
 {
     if (idxStart >= nodeArray.size() || idxEnd >= nodeArray.size()) return false;
@@ -205,6 +220,603 @@ void LatticeModeler::getBBox(Eigen::Vector3d &left, Eigen::Vector3d &right, T &e
 
 bool LatticeModeler::sliceModelImplicitStream(std::string path)
 {
+	typedef Eigen::Matrix<double, 7, 1> Vector7d; // store edge
+
+	//  read model
+	if (readLatticeModel(path)) std::cout << "LatticeModeler > successfully read the model." << endl;
+	if (ptrLatticeModel->isEmpty()) { std::cerr << "LatticeModeler > can't find a model" << endl; return false; }
+
+	// basic setup
+	double convolRadius(m_radiusConvol), convolThreshold(m_thresholdConvol); // todo: add user input
+	Eigen::Vector3d left, right;
+	getBBox(left, right);
+	std::cout << "bounding box: " << left.transpose() << ", " << right.transpose() << std::endl;
+	// padding bounding box to attain robustness
+	left += Eigen::Vector3d(-3 * convolRadius, -3 * convolRadius, -3 * convolRadius);
+	right += Eigen::Vector3d(3 * convolRadius, 3 * convolRadius, 3 * convolRadius);
+
+	// sort edges w.r.t. z-coordinate, and write to file
+	long time = clock();
+	std::sort(ptrLatticeModel->edgeArray.begin(), ptrLatticeModel->edgeArray.end(), [](auto& lhs, auto& rhs) {
+		double z1 = std::min(lhs->start->p[2], lhs->end->p[2]);
+		double z2 = std::min(rhs->start->p[2], rhs->end->p[2]);
+		return z1 < z2;
+		});
+	std::string pathLatticeGraph(volumeMeshFilePath + "_sortedGraph.txt");
+	writeLatticeModel(true, pathLatticeGraph);
+	clearLatticeModel(); // release memory
+	std::cout << "LatticeModeler > Edge Sorting and writing Time: " << clock() - time << endl;
+
+
+	// get layer thick
+	double layerThick;
+	std::cout << "Choose the thickness of layers: ";
+	std::cin >> layerThick;
+
+	// get resolution
+	size_t resX, resY;
+	std::cout << "Choose the resolution: ";
+	std::cin >> resX >> resY;
+
+	time = clock();
+	// Support structure
+	bool *gridNodes;
+	//vector<vector<int>> binaryNodes[40];
+	int imageSize[3] = { 0,0,0 };
+
+
+	double cellSize = min((right[0] - left[0]) / min(resX, resY), (right[1] - left[1]) / min(resX, resY));
+	resX = (right[0] - left[0]) / cellSize;
+	resY = (right[1] - left[1]) / cellSize;
+	imageSize[0] = resX; //cout << (right[0] - left[0]) << endl;
+	imageSize[2] = resY; //cout << (right[1] - left[1]) << endl;
+	int*** binaryNodes;
+	binaryNodes = new int**[100];
+	for (int i = 0; i < 100; i++)
+	{
+		binaryNodes[i] = new int*[resX];
+		for (int j = 0; j < resX; j++)
+		{
+			binaryNodes[i][j] = new int[resY];
+		}
+	}
+	// a functor for slicing at each iteration
+	auto intersectEdgesPlane = [&](std::vector<Vector7d>& edges, double layerLevel, size_t layerNum) {
+		if (edges.empty()) return;
+		// edges: 0-2: first point coordinates; 3-5: second point coordinates; 6: radius
+		// setup the digital image size, resolution, and convolutional radius
+		/*Eigen::Vector3d leftLocal, rightLocal;
+		getBBox(leftLocal, rightLocal, edges);
+		leftLocal += Eigen::Vector3d(-convolRadius, -convolRadius, 0);
+		rightLocal += Eigen::Vector3d(convolRadius, convolRadius, 0);
+		leftLocal[2] = rightLocal[2] = layerLevel;
+
+		double cellSize(std::min((rightLocal[0] - leftLocal[0]) / min(resX, resY), (rightLocal[1] - leftLocal[1]) / min(resX, resY))); // todo: input from the user, or determined by the bar radius
+		size_t xRes(std::ceil((rightLocal[0] - leftLocal[0]) / cellSize));
+		size_t yRes(std::ceil((rightLocal[1] - leftLocal[1]) / cellSize));
+		if (xRes < yRes) yRes = max(yRes, max(resX, resY));
+		else xRes = max(xRes, max(resX, resY));
+		std::cout << "LatticeModeler > digital image resoltuion at "<< layerNum << "-th layer :" << xRes << "*" << yRes << endl;*/
+		std::unordered_map<std::string, double> digitImage; // string: "rowIdx+space+colIdx"
+
+
+		// do convolution
+		for (auto& e : edges) {
+			double xMin, yMin, xMax, yMax;
+			Eigen::Vector3d p0(e.segment(0, 3)), p1(e.segment(3, 3));
+			// clamp the edge in case it's too long
+			if (abs(p0[2] - p1[2]) > 1e-6) {
+				Eigen::Vector3d p3(p0), p4(p1);
+				double t = (layerLevel + convolRadius - p0[2]) / (p0[2] - p1[2]);
+				if (t >= 0 && t <= 1) p4 = p0 + t * (p1 - p0);
+				t = (layerLevel - convolRadius - p0[2]) / (p0[2] - p1[2]);
+				if (t >= 0 && t <= 1) p3 = p0 + t * (p1 - p0);
+				p0 = p3;
+				p1 = p4;
+			}
+
+			double radius(e[6]);
+			xMin = std::min(p0[0], p1[0]) - convolRadius;
+			xMax = std::max(p0[0], p1[0]) + convolRadius;
+			yMin = std::min(p0[1], p1[1]) - convolRadius;
+			yMax = std::max(p0[1], p1[1]) + convolRadius;
+			/*int gridIdxMinX(std::floor((xMin - leftLocal[0]) / cellSize));
+			int gridIdxMinY(std::floor((yMin - leftLocal[1]) / cellSize));
+			int gridIdxMaxX(std::ceil((xMax - leftLocal[0]) / cellSize));
+			int gridIdxMaxY(std::ceil((yMax - leftLocal[1]) / cellSize));*/
+
+			int gridIdxMinX(std::floor((xMin - left[0]) / cellSize));
+			int gridIdxMinY(std::floor((yMin - left[1]) / cellSize));
+			int gridIdxMaxX(std::ceil((xMax - left[0]) / cellSize));
+			int gridIdxMaxY(std::ceil((yMax - left[1]) / cellSize));
+
+			for (auto rowIdx(gridIdxMinX); rowIdx <= gridIdxMaxX; ++rowIdx) {
+				for (auto colIdx(gridIdxMinY); colIdx <= gridIdxMaxY; ++colIdx) {
+					// compute convolution value for this point with regards to edge e
+					Eigen::Vector3d p(left[0] + cellSize * rowIdx, left[1] + cellSize * colIdx, layerLevel);
+					double l((p1 - p0).norm()), a((p0 - p).dot(p1 - p0)), b((p0 - p).norm());
+					// compute line-sphere intersection
+					l *= l; a *= 2; b = b * b - convolRadius * convolRadius;
+					double delta = a * a - 4 * l * b;
+					if (delta >= 1e-6) {
+						double intersect1 = (-a - std::sqrt(delta)) / (2 * l);
+						double intersect2 = (-a + std::sqrt(delta)) / (2 * l);
+						double start = std::max(0., std::min(intersect1, intersect2));
+						double end = std::min(1., std::max(intersect1, intersect2));
+						if (start <= 1 && end >= 0) {
+							l = std::sqrt(l); a /= -2; b += convolRadius * convolRadius; b = std::sqrt(b);
+							double f = radius / (15 * std::pow(convolRadius, 4)) *
+								(3 * std::pow(l, 4) * (std::pow(end, 5) - std::pow(start, 5)) -
+									15 * a * l * l * (std::pow(end, 4) - std::pow(start, 4)) +
+									20 * a * a * (std::pow(end, 3) - std::pow(start, 3)));
+							auto key = std::to_string(rowIdx) + " " + std::to_string(colIdx);
+							auto iter = digitImage.find(key);
+							if (iter == digitImage.end()) digitImage.insert(std::make_pair(key, f)); // do convolution
+							else iter->second += f; //summarization for convolution
+						}
+					}
+					// end of convolution
+				}
+			}
+		}
+
+		// create a bindary image: exclude non-solid parts
+		for (auto iter = digitImage.begin(), last = digitImage.end(); iter != last; ) {
+			if (iter->second <= convolThreshold) iter = digitImage.erase(iter);
+			else ++iter;
+		}
+		if (digitImage.empty()) return;
+
+		// Support structure
+		for (size_t i = 0; i < imageSize[0]; i++)
+		{
+			
+			for (size_t j = 0; j < imageSize[2]; j++)
+			{
+				auto iter = digitImage.find(std::to_string(i) + " " + std::to_string(j));
+				if (iter != digitImage.end())
+				{
+					binaryNodes[layerNum][i][j] = 1;
+					//binaryNodes[layerNum].push_back(1);
+				}
+				else
+				{
+					binaryNodes[layerNum][i][j] = 0;
+					//binaryNodes[layerNum].push_back(0);
+				}
+			}
+		}
+
+		// save the bindary image to file
+		size_t width = resX, height = resY;
+		QImage img(width, height, QImage::Format_RGB32);
+		for (size_t i(0); i < width; ++i) {
+			for (size_t j(0); j < height; ++j) {
+				auto iter = digitImage.find(std::to_string(i) + " " + std::to_string(j));
+				if (iter != digitImage.end()) img.setPixel(i, j, qRgb(0, 0, 0));
+				else img.setPixel(i, j, qRgb(255, 255, 255));
+			}
+		}
+		std::string path = volumeMeshFilePath + "." + std::to_string(layerNum) + ".slice.jpg";
+		if (!img.save(QString::fromStdString(path), "JPEG", 50)) std::cerr << "LatticeModeler > error writing picture at layer: " << layerNum << endl;
+		else std::cout << "LatticeModeler > successfully writing picture at layer: " << layerNum << endl;
+
+		// do contouring with optimization
+		/*MarchingSquareBin msb(digitImage, xRes, yRes, cellSize, layerLevel, leftLocal.data()); // binImage will be moved, not copy, into MarchingSquareBin
+		msb.doContouring();
+		auto result = msb.getContours(false);*/
+		//.......................
+		// do things with "result"
+
+		//........................
+		MarchingSquareBin msb(digitImage, resX, resY, cellSize, layerLevel, left.data());
+		msb.doContouring();
+		path = volumeMeshFilePath + "." + std::to_string(layerNum) + ".contours.off";
+		//msb.writeContours(path);
+		auto result = msb.getContours(true);
+		layers.push_back(std::shared_ptr<QMeshPatch>(result));
+		//auto result2 = msb.getContours(true);
+		//std::string clipath = "Results/Contours/out_volume.contours1.cli";
+		//writeCLIFile(clipath, layers);
+		std::cout << "LatticeModeler > successfully generating contours at layer: " << layerNum << endl;
+	};
+
+	// steaming from file
+	std::vector<Vector7d> edgeList; // to be used as a heap
+	auto cmp = [](auto& left, auto& right) {return std::max(left[2], left[5]) > std::max(right[2], right[5]); }; // for max heap
+
+	// setup slicing parameters
+	double zMin(left[2]), zMax(right[2]);
+	size_t layerNum(1);
+	double layerLevel(zMin + layerThick);
+	zMax -= layerThick / 10;
+
+	std::ifstream ifs(pathLatticeGraph.c_str(), ifstream::in);
+	std::string line; std::getline(ifs, line); // exclude the first line
+	while (layerLevel < zMax) {
+		// get new edges
+		while (ifs.good() && !ifs.eof() && std::getline(ifs, line)) {
+			Vector7d edge;
+			stringstream str(line);
+			str >> edge[0] >> edge[1] >> edge[2]; // point 1
+			str >> edge[3] >> edge[4] >> edge[5]; // point 2
+			str >> edge[6]; // radius
+
+			// push into heap if the edge's zMin is below the current layerLevel
+			double lowerBound = std::min(edge[2] - convolRadius, edge[5] - convolRadius);
+			double upperBound = std::max(edge[2] + convolRadius, edge[5] + convolRadius);
+			if (upperBound >= layerLevel - tolerence) {
+				edgeList.push_back(edge);
+				std::push_heap(edgeList.begin(), edgeList.end(), cmp);
+			}
+			if (lowerBound >= layerLevel + tolerence) break;
+		}
+
+		// remove if the edge's zMax is below the current layerLevel
+		while (!edgeList.empty()) {
+			double upperBound = std::max(edgeList.front()[2] + convolRadius, edgeList.front()[5] + convolRadius);
+			if (upperBound < layerLevel + tolerence)
+			{
+				std::pop_heap(edgeList.begin(), edgeList.end(), cmp); edgeList.pop_back();
+			}
+			else break;
+		}
+		if (edgeList.empty()) { layerLevel += layerThick; continue; }
+
+		// do slicing
+		time = clock();
+		std::cout << "LatticeModeler > Slicing edge num: " << edgeList.size() << endl;
+		intersectEdgesPlane(edgeList, layerLevel, layerNum);
+		std::cout << "LatticeModeler > Slicing Time (micro second) for " << layerNum << "-th layer:" << double(clock() - time) / CLOCKS_PER_SEC << endl;
+
+		++layerNum;
+		layerLevel += layerThick;
+	}
+	ifs.close();
+	std::cout << "LatticeModeler > successfully slicing the model" << std::endl;
+	// write to .cli files
+	string clipath = "Results/CLIFileforPart/out_volume.contours.cli";
+	//writeCLIFileBin(path, nullptr, 0, 3); // 3: finish writing the cli file
+	//    readCLIFileBin(path);
+	writeCLIFileBin(clipath, layers);
+	clipath = "Results/CLIFileforPart/out_volume.contours1.cli";
+	writeCLIFile(clipath, layers);
+
+	// Support structure
+	imageSize[1] = layerNum - 1;
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(gridNodes), imageSize[0] * imageSize[1] * imageSize[2] * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)gridNodes, 0.0, imageSize[0] * imageSize[1] * imageSize[2] * sizeof(bool)));
+
+	int idx = 0;
+	bool* tmp = new bool[imageSize[0] * imageSize[1] * imageSize[2]];
+	for (int j = 0; j < imageSize[2]; j++)
+	{
+		for (int k = 1; k <= imageSize[1]; k++)
+		{
+
+			for (int i = 0; i < imageSize[0]; i++)
+			{
+				//gridNodes[idx] = binaryNodes[i][j];
+				if (binaryNodes[k][i][j] == 1)
+					tmp[idx] = true;
+				else
+					tmp[idx] = false;
+				idx++;
+			}
+
+		}
+	}
+	CUDA_SAFE_CALL(cudaMemcpy((void*)gridNodes, (void*)tmp, imageSize[0] * imageSize[1] * imageSize[2] * sizeof(bool), cudaMemcpyHostToDevice));
+	//User specified variables
+	double anchorR = 2;
+	double thres = 0.2;
+	double nSampleWidth = 0.005;
+	double cylinderRadius = 6.0;
+	double patternThickness = 3;
+	
+	bool *suptNodes;
+	bool *tempImage;
+	bool *targetImage;
+	bool *assistImage;
+	bool *temp3D;
+
+
+	double anchorRadius = anchorR;
+	double threshold = thres;
+
+	int suptRadius = (int)floor(anchorRadius*1.414 / nSampleWidth);
+	int suptGridResX = (imageSize[0] - 1) / suptRadius + 1;
+	int suptGridResZ = (imageSize[2] - 1) / suptRadius + 1;
+
+	int3 imgRes = make_int3(imageSize[0], imageSize[1], imageSize[2]);
+	int3 suptimgRes = make_int3(imageSize[0], imageSize[1] - 1, imageSize[2]);
+	int nodeNum = imageSize[0] * imageSize[2];
+
+	long ti[10] = { 0 };
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(temp3D), imageSize[0] * (imageSize[1] - 1)*imageSize[2] * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)temp3D, 0, imageSize[0] * (imageSize[1] - 1)*imageSize[2] * sizeof(bool)));
+
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(suptNodes), imageSize[0] * (imageSize[1] - 1)*imageSize[2] * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)suptNodes, false, imageSize[0] * (imageSize[1] - 1)*imageSize[2] * sizeof(bool)));
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(tempImage), nodeNum * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)tempImage, false, nodeNum * sizeof(bool)));
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(targetImage), nodeNum * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)targetImage, false, nodeNum * sizeof(bool)));
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(assistImage), nodeNum * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)assistImage, false, nodeNum * sizeof(bool)));
+
+
+	short2 **disTextures = (short2 **)malloc(2 * sizeof(short2 *));
+
+	int disTexSize = max(imageSize[0], imageSize[2]);
+	int factor = ceil((float)disTexSize / BLOCKSIZE);
+	disTexSize = BLOCKSIZE * factor;
+
+	int disMemSize = disTexSize * disTexSize * sizeof(short2);
+
+	// Allocate 2 textures
+
+	cudaMalloc((void **)&disTextures[0], disMemSize);
+	cudaMalloc((void **)&disTextures[1], disMemSize);
+
+	unsigned int *LinkIndex;
+	CUDA_SAFE_CALL(cudaMalloc((void **)&LinkIndex, (nodeNum + 1) * sizeof(unsigned int)));
+	CUDA_SAFE_CALL(cudaMemset((void*)LinkIndex, 0, (nodeNum + 1) * sizeof(unsigned int)));
+
+	long t;
+	
+	for (int i = imageSize[1] - 2; i > -1; i--)
+	{
+		t = clock();
+		call_krSLAContouring_Initialization(tempImage, targetImage, gridNodes, nodeNum, imgRes, i);
+		CUDA_SAFE_CALL(cudaMemcpy(assistImage, targetImage, nodeNum * sizeof(bool), cudaMemcpyDeviceToDevice));
+		ti[0] += clock() - t;
+
+		t = clock();
+		LDNIcudaOperation::LDNISLAContouring_GrowthAndSwallow(threshold, targetImage, tempImage, i, imageSize, nSampleWidth, disTextures[0], disTextures[1], disTexSize);
+
+
+		ti[1] += clock() - t;
+		//add new support cylinder if necessary
+		CUDA_SAFE_CALL(cudaMemset((void*)tempImage, false, nodeNum * sizeof(bool)));
+		CUDA_SAFE_CALL(cudaMemset((void*)assistImage, false, nodeNum * sizeof(bool)));
+		call_krSLAContouring_Filter1(assistImage, tempImage, targetImage, suptGridResX*suptGridResZ, make_int2(imageSize[0], imageSize[2]), suptRadius, i);
+
+
+		//first step: support region growth in first class cylinders
+		LDNIcudaOperation::LDNISLAContouring_GrowthAndSwallow(anchorRadius, targetImage, assistImage, i, imageSize, nSampleWidth, disTextures[0], disTextures[1], disTexSize);
+
+
+		//second step: prepare second class cylinders and perform support region growth in second class cylinders
+		CUDA_SAFE_CALL(cudaMemset((void*)assistImage, false, nodeNum * sizeof(bool)));
+		call_krSLAContouring_OrthoSearchRemainAnchorZ(assistImage, tempImage, targetImage, suptGridResX,
+			make_int2(suptRadius, imageSize[2]), make_int2(imageSize[0], imageSize[2]), i);
+
+
+
+		call_krSLAContouring_OrthoSearchRemainAnchorX(assistImage, tempImage, targetImage, suptGridResZ,
+			make_int2(suptRadius, imageSize[0]), make_int2(imageSize[0], imageSize[2]), i);
+
+
+
+		LDNIcudaOperation::LDNISLAContouring_GrowthAndSwallow(anchorRadius, targetImage, assistImage, i, imageSize, nSampleWidth, disTextures[0], disTextures[1], disTexSize);
+
+
+		//third step: prepare third class cylinders and support region growth in all third class cylinders
+		CUDA_SAFE_CALL(cudaMemset((void*)assistImage, false, nodeNum * sizeof(bool)));
+		LDNIcudaOperation::LDNISLAContouring_ThirdClassCylinder(anchorRadius, targetImage, assistImage, tempImage, make_int2(imageSize[0], imageSize[2]), nSampleWidth, i, disTextures[0], disTextures[1], disTexSize);
+
+
+		//generate support structure map for this layer and update the cylinder position information arrays
+
+		call_krSLAContouring_Filter5(gridNodes, tempImage, suptNodes, LinkIndex, nodeNum, imgRes, i);
+
+
+
+
+		call_krFDMContouring_CopyNodesrom2Dto3D(tempImage, temp3D, nodeNum, suptimgRes, i);
+
+	}
+
+	cudaFree(disTextures[0]);
+	cudaFree(disTextures[1]);
+	free(disTextures);
+	cudaFree(assistImage);
+	cudaFree(targetImage);
+	cudaFree(tempImage);
+
+	unsigned int LinkNum;
+	call_func::setdev_ptr(LinkIndex, nodeNum, LinkNum);
+
+
+	short *linkLayerD;
+	short2 *linkID;
+	unsigned int *linkLayerC;
+	unsigned int *temp2D;
+
+	CUDA_SAFE_CALL(cudaMalloc((void **)&temp2D, nodeNum * sizeof(unsigned int)));
+	CUDA_SAFE_CALL(cudaMemset((void*)temp2D, 0, nodeNum * sizeof(unsigned int)));
+	CUDA_SAFE_CALL(cudaMalloc((void **)&linkLayerC, LinkNum * sizeof(unsigned int)));
+	//CUDA_SAFE_CALL(cudaMemset((void*)linkLayerC, imgRes.y+1, LinkNum*sizeof(unsigned int) ) );
+	CUDA_SAFE_CALL(cudaMalloc((void **)&linkLayerD, LinkNum * sizeof(short)));
+	CUDA_SAFE_CALL(cudaMemset((void*)linkLayerD, 0, LinkNum * sizeof(short)));
+	CUDA_SAFE_CALL(cudaMalloc((void **)&linkID, LinkNum * sizeof(short2)));
+	CUDA_SAFE_CALL(cudaMemset((void*)linkID, 0, LinkNum * sizeof(short2)));
+
+
+	call_func::setdev_ptr2(linkLayerC, LinkNum, imgRes);
+
+	call_krSLAContouring_FindAllLinks(LinkIndex, linkLayerC, linkLayerD, linkID, temp3D, temp2D, suptimgRes.x*suptimgRes.y*suptimgRes.z, suptimgRes);
+
+	cudaFree(temp3D);
+	cudaFree(temp2D);
+
+
+
+	call_krSLAContouring_RelateAllLinksBetweenLayers(LinkIndex, linkLayerC, gridNodes, suptNodes, suptimgRes.x*suptimgRes.y*suptimgRes.z, imgRes);
+
+	cudaFree(LinkIndex);
+
+
+
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(tempImage), nodeNum * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)tempImage, false, nodeNum * sizeof(bool)));
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(targetImage), nodeNum * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)targetImage, false, nodeNum * sizeof(bool)));
+
+
+	double realThreshold = (cylinderRadius*nSampleWidth - nSampleWidth) / nSampleWidth;
+	int gridRadius = (int)floor(realThreshold);
+
+	for (int i = imageSize[1] - 2; i > -1; i--)
+	{
+		call_krFDMContouring_CopyNodesrom3Dto2D(targetImage, suptNodes, nodeNum, suptimgRes, i);
+		CUDA_SAFE_CALL(cudaMemcpy(tempImage, targetImage, nodeNum * sizeof(bool), cudaMemcpyDeviceToDevice));
+		call_krFDMContouring_Dilation(targetImage, tempImage, nodeNum, imgRes, realThreshold, gridRadius, i);
+
+
+		call_krFDMContouring_CopyNodesrom2Dto3D(tempImage, suptNodes, nodeNum, suptimgRes, i);
+	}
+	cudaFree(targetImage);
+	cudaFree(tempImage);
+
+	for (int i = imageSize[1] - 3; i > -1; i--)
+		call_krFDMContouring_VerticalSpptPxlProp(gridNodes, suptNodes, nodeNum, imgRes, i);
+
+	int linkThreshold = (int)(0.4 / nSampleWidth);
+	int lengthofLayer = linkThreshold / 8;
+	int furtherStepLength = lengthofLayer / 2;
+
+
+
+
+	LDNIcudaOperation::LDNISLAContouring_GenerateConnectionforCylinders(linkLayerC, linkLayerD, linkID, gridNodes, suptNodes, imageSize, linkThreshold,
+		lengthofLayer, furtherStepLength, LinkNum, nSampleWidth);
+
+	cudaFree(linkLayerC);
+	cudaFree(linkLayerD);
+	cudaFree(linkID);
+	//cudaFree(gridNodes);
+
+
+	realThreshold = (patternThickness*nSampleWidth - nSampleWidth) / nSampleWidth;
+	gridRadius = (int)floor(realThreshold);
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(tempImage), nodeNum * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)tempImage, false, nodeNum * sizeof(bool)));
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(targetImage), nodeNum * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)targetImage, false, nodeNum * sizeof(bool)));
+
+	for (int i = imageSize[1] - 2; i > -1; i--)
+	{
+
+		call_krFDMContouring_CopyNodesrom3Dto2D(targetImage, suptNodes, nodeNum, suptimgRes, i);
+		CUDA_SAFE_CALL(cudaMemcpy(tempImage, targetImage, nodeNum * sizeof(bool), cudaMemcpyDeviceToDevice));
+		call_krFDMContouring_Dilation(targetImage, tempImage, nodeNum, imgRes, realThreshold, gridRadius, i);
+		call_krFDMContouring_CopyNodesrom2Dto3D(tempImage, suptNodes, nodeNum, suptimgRes, i);
+
+	}
+
+	cudaFree(targetImage);
+	cudaFree(tempImage);
+
+
+	bool* gridtmp = new bool[imageSize[0] * imageSize[1] * imageSize[2]];
+	CUDA_SAFE_CALL(cudaMemcpy((void*)gridtmp, (void*)gridNodes, imageSize[0] * imageSize[1] * imageSize[2] * sizeof(bool), cudaMemcpyDeviceToHost));
+	int cnt = 0;
+	size_t width = imageSize[0], height = imageSize[2], slicenum = imageSize[1];
+	QImage *img = new QImage[slicenum];
+	for (int i = 0; i < slicenum; i++)
+	{
+		QImage tmpimg(width, height, QImage::Format_RGB32);
+		img[i] = tmpimg;
+	}
+	for (int j = 0; j < imageSize[2]; j++)
+	{
+
+		for (int k = 0; k < imageSize[1]; k++)
+		{
+
+			for (int i = 0; i < imageSize[0]; i++)
+			{
+				if (gridtmp[cnt++])img[k].setPixel(i, j, qRgb(0, 0, 0));
+				else img[k].setPixel(i, j, qRgb(255, 255, 255));
+
+			}
+		}
+
+	}
+	for (int i = 1; i <= imageSize[1]; i++)
+	{
+		std::string path = "Results/Support/out_volume." + std::to_string(i) + ".origin.jpg";
+		if (!img[i - 1].save(QString::fromStdString(path), "JPEG", 50)) std::cerr << "Origin > error writing picture at layer: " << i << endl;
+		else std::cout << "Origin > successfully writing picture at layer: " << i << endl;
+	}
+
+
+	std::unordered_map<std::string, double> *digitImage = new std::unordered_map<std::string, double>[slicenum - 1];//generate contours for support structure
+	std::vector<std::shared_ptr<QMeshPatch>> suptlayers;
+	layerLevel = zMin + layerThick;
+	bool* supttmp = new bool[imageSize[0] * (imageSize[1] - 1)*imageSize[2]];
+	CUDA_SAFE_CALL(cudaMemcpy((void*)supttmp, (void*)suptNodes, imageSize[0] * (imageSize[1] - 1) * imageSize[2] * sizeof(bool), cudaMemcpyDeviceToHost));
+	cnt = 0;
+	QImage *suptimg = new QImage[slicenum - 1];
+	for (int i = 0; i < slicenum - 1; i++)
+	{
+		QImage tmpimg(width, height, QImage::Format_RGB32);
+		suptimg[i] = tmpimg;
+	}
+	for (int j = 0; j < imageSize[2]; j++)
+	{
+		for (int k = 0; k < imageSize[1] - 1; k++)
+		{
+
+			for (int i = 0; i < imageSize[0]; i++)
+			{
+				if (supttmp[cnt++])
+				{
+					suptimg[k].setPixel(i, j, qRgb(255, 0, 0));
+					auto key = std::to_string(i) + " " + std::to_string(j);
+					digitImage[k].insert(std::make_pair(key, 1));
+				}
+				else suptimg[k].setPixel(i, j, qRgb(255, 255, 255));
+
+			}
+		}
+
+	}
+	for (int i = 1; i <= imageSize[1] - 1; i++)
+	{
+		std::string path = "Results/Support/out_volume." + std::to_string(i) + ".support.jpg";
+		if (!suptimg[i - 1].save(QString::fromStdString(path), "JPEG", 50)) std::cerr << "Support > error writing picture at layer: " << i << endl;
+		else std::cout << "Support > successfully writing picture at layer: " << i << endl;
+
+		MarchingSquareBin msb(digitImage[i - 1], resX, resY, cellSize, layerLevel, left.data());
+		msb.doContouring();
+		path = "Results/Support/out_volume." + std::to_string(i) + ".contours.off";
+		//msb.writeContours(path);
+		auto result = msb.getContours(true);
+		suptlayers.push_back(std::shared_ptr<QMeshPatch>(result));
+		layerLevel += layerThick;
+	}
+	// write to .cli files
+	string suptclipath = "Results/Support/CLIFileforSupt/out_volume.contours.cli";
+	writeCLIFileBin(suptclipath, suptlayers);
+	suptclipath = "Results/Support/CLIFileforSupt/out_volume.contours1.cli";
+	writeCLIFile(suptclipath, suptlayers);
+	return true;
+}
+
+/*bool LatticeModeler::sliceModelImplicitStream(std::string path)
+{
     typedef Eigen::Matrix<double, 7, 1> Vector7d; // store edge
 
     //  read model
@@ -271,7 +883,7 @@ bool LatticeModeler::sliceModelImplicitStream(std::string path)
         size_t yRes(std::ceil((rightLocal[1] - leftLocal[1]) / cellSize));
         if (xRes < yRes) yRes = max(yRes, max(resX, resY));
         else xRes = max(xRes, max(resX, resY));
-        std::cout << "LatticeModeler > digital image resoltuion at "<< layerNum << "-th layer :" << xRes << "*" << yRes << endl;*/
+        std::cout << "LatticeModeler > digital image resoltuion at "<< layerNum << "-th layer :" << xRes << "*" << yRes << endl;
         std::unordered_map<std::string, double> digitImage; // string: "rowIdx+space+colIdx"
 
 
@@ -298,7 +910,7 @@ bool LatticeModeler::sliceModelImplicitStream(std::string path)
             /*int gridIdxMinX(std::floor((xMin - leftLocal[0]) / cellSize));
             int gridIdxMinY(std::floor((yMin - leftLocal[1]) / cellSize));
             int gridIdxMaxX(std::ceil((xMax - leftLocal[0]) / cellSize));
-            int gridIdxMaxY(std::ceil((yMax - leftLocal[1]) / cellSize));*/
+            int gridIdxMaxY(std::ceil((yMax - leftLocal[1]) / cellSize));
 
 			int gridIdxMinX(std::floor((xMin - left[0]) / cellSize));
 			int gridIdxMinY(std::floor((yMin - left[1]) / cellSize));
@@ -380,7 +992,7 @@ bool LatticeModeler::sliceModelImplicitStream(std::string path)
         // do contouring with optimization
         /*MarchingSquareBin msb(digitImage, xRes, yRes, cellSize, layerLevel, leftLocal.data()); // binImage will be moved, not copy, into MarchingSquareBin
         msb.doContouring();
-        auto result = msb.getContours(false);*/
+        auto result = msb.getContours(false);
         //.......................
         // do things with "result"
 
@@ -649,7 +1261,7 @@ bool LatticeModeler::sliceModelImplicitStream(std::string path)
 	suptclipath = "Results/Support/CLIFileforSupt/out_volume.contours1.cli";
 	writeCLIFile(suptclipath, suptlayers);
     return true;
-}
+}*/
 
 void LatticeModeler::save2Pic(std::vector<std::vector<double> > &digitImage, string path, int dpi)
 {
