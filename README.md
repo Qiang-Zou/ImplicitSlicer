@@ -6,19 +6,15 @@
 - Latest Release: 2020
 
 ## !important
-The source code is for the method presented in
-
-Shengjun Liu, Tao Liu, Qiang Zou, Weiming Wang, Eugeni L. Doubrovski, and Charlie C.L. Wang, "Memory-efficient modeling and slicing of large-scale adaptive lattice structures", ASME Trans. JCISE, Accepted.
+The source code is for the method presented in [1,2]
 
 It can be compiled with QT 5.10+MSVC 14.0, and run on the operating system Windows 10.
-
-
 
 
 1.Copyright
 -----------
 
-- ImplicitSlicer is developed by Qiang Zou, and now maintained by Sifan Chen, based on [1-4] for research use. All rights about the program (esp. surface reconstruction) are reserved by Qiang Zou. This C++ source codes are available only to a primary user for academic purposes. No secondary use, such as copy, distribution, diversion, business purpose, etc., is allowed. In no event shall the author be liable to any party for direct, indirect, special, incidental, or consequential damage arising out of the use of this program. ImplicitSlicer is self-contained. 
+- ImplicitSlicer is developed by Qiang Zou, and now maintained by Sifan Chen, based on [1-4] for research use. All rights about the program are reserved by Qiang Zou. This C++ source codes are available only to a primary user for academic purposes. No secondary use, such as copy, distribution, diversion, business purpose, etc., is allowed. In no event shall the author be liable to any party for direct, indirect, special, incidental, or consequential damage arising out of the use of this program. ImplicitSlicer is self-contained. 
 
 
 2.Download
