@@ -4,6 +4,10 @@
 #include "device_launch_parameters.h"
 #include <stdio.h>
 #include "malloc.h"
+#include<unordered_map>
+#include<string>
+#include <Eigen/Dense>
+#define SCALAR float
 extern "C" void call_krFDMContouring_SubtractSolidRegion(bool *gridNodes, bool *suptNodes, bool *seedNodes, int nodeNum, int3 imageRes, int iy);
 extern "C" void call_krFDMContouring_CopyNodesrom3Dto2D(bool *m_2DNodes, bool *m_3DNodes, int nodeNum, int3 imageRes, int iy);
 extern "C" void call_krFDMContouring_Filter4(bool* outNodes, bool *inNodesA, bool *inNodesB, int nodeNum, int3 imageRes, int iy);
@@ -21,6 +25,13 @@ extern "C" void call_krSLAContouring_RelateAllLinksBetweenLayers(unsigned int *l
 extern "C" void call_krFDMContouring_Dilation(bool *seedNodes, bool* output, int nodeNum, int3 imageRes, double realThreshold, int gridRadius, int iy);
 extern "C" void call_krFDMContouring_VerticalSpptPxlProp(bool *gridNodes, bool *suptNodes, int nodeNum, int3 imageRes, int iy);
 
+extern "C" void call_RegionSubtractionSLA(bool *tempImg, bool *targetImg, bool *upperLayer, bool *lowerLayer, int nodeNum, int3 imageRes);
+extern "C" void call_Filter5forSLA(bool *upperLayer, bool *lowerLayer, bool *tempImg, bool *upperSupt, bool *lowerSupt, unsigned int *linkIndex, int nodeNum, int3 imageRes, int layerNum,int flag);
+extern "C" void call_myFindAllLinks(unsigned int *linkIndex, unsigned int *linkLayerC, short *linkLayerD, short2 *linkID, bool *tempImg, unsigned int *count, int nodeNum, int3 imageRes, unsigned int iy);
+extern "C" void call_myRelateAllLinksBetweenLayers(unsigned int *linkIndex, unsigned int *linkLayerC, bool *lowerLayer, bool *upperSupt, int nodeNum, int3 imageRes, int layerNum, unsigned int iy);
+extern "C" void call_myVerticalSpptPxlProp(bool *lowerLayer, bool *upperSupt, bool *lowerSupt, int nodeNum, int3 imageRes);
+
+extern "C" void call_DoConvolution(SCALAR* digitImage, int gridIdxMinX, int gridIdxMinY, double cellSize, int nodeNum, int2 XY,int3 imgRes, double left, double right, Eigen::Vector3d p0, Eigen::Vector3d p1, double convolRadius, double radius,double layerLevel);
 class call_func
 {
 public:

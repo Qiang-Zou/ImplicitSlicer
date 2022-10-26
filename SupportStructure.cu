@@ -51,6 +51,12 @@ extern __global__ void krSLAContouring_InitializedDistanceMap(bool *seedNodes, s
 extern __global__ void krSLAContouring_FindAllLinks(unsigned int *linkIndex, unsigned int *linkLayerC, short *linkLayerD, short2 *linkID, bool *tempImg, unsigned int *count, int nodeNum, int3 imageRes);
 extern __global__ void krSLAContouring_RelateAllLinksBetweenLayers(unsigned int *linkIndex, unsigned int *linkLayerC, bool *gridNodes, bool *suptNodes, int nodeNum, int3 imageRes);
 extern __global__ void krFDMContouring_VerticalSpptPxlProp(bool *gridNodes, bool *suptNodes, int nodeNum, int3 imageRes, int iy);
+
+extern __global__ void RegionSubtractionSLA(bool *tempImg, bool *targetImg, bool *upperLayer, bool *lowerLayer, int nodeNum, int3 imageRes);
+extern __global__ void Filter5forSLA(bool *upperLayer, bool *lowerLayer, bool *tempImg, bool *upperSupt, bool *lowerSupt, unsigned int *linkIndex, int nodeNum, int3 imageRes, int layerNum,int flag);
+extern __global__ void myFindAllLinks(unsigned int *linkIndex, unsigned int *linkLayerC, short *linkLayerD, short2 *linkID, bool *tempImg, unsigned int *count, int nodeNum, int3 imageRes, unsigned int iy);
+extern __global__ void myRelateAllLinksBetweenLayers(unsigned int *linkIndex, unsigned int *linkLayerC, bool *lowerLayer, bool *upperSupt, int nodeNum, int3 imageRes, int layerNum, unsigned int iy);
+extern __global__ void myVerticalSpptPxlProp(bool *lowerLayer, bool *upperSupt, bool *lowerSupt, int nodeNum, int3 imageRes);
 #define MARKER      -32768
 #define BLOCKSIZE	64
 #define TILE_DIM	32
@@ -1146,7 +1152,27 @@ __global__ void krFDMContouring_Erosion(bool *gridNodes, bool* output, int nodeN
 
 	}
 }
+extern "C" void call_RegionSubtractionSLA(bool *tempImg, bool *targetImg, bool *upperLayer,bool *lowerLayer, int nodeNum, int3 imageRes)
+{
+	RegionSubtractionSLA << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (tempImg, targetImg, upperLayer, lowerLayer, nodeNum, imageRes);
+}
+__global__ void RegionSubtractionSLA(bool *tempImg, bool *targetImg, bool *upperLayer, bool *lowerLayer, int nodeNum, int3 imageRes)
+{
+	int index = threadIdx.x + blockIdx.x*blockDim.x;
+	unsigned int ix, iz;
+	bool node;
+	while (index < nodeNum)
+	{
+		ix = index % imageRes.x;
+		iz = index / imageRes.x;
 
+		node = lowerLayer[iz*imageRes.x + ix];
+		tempImg[index] = node;
+		targetImg[index] = upperLayer[iz*imageRes.x + ix] && (!node);
+
+		index += blockDim.x * gridDim.x;
+	}
+}
 extern "C" void call_krSLAContouring_Initialization(bool *tempImg, bool *targetImg, bool *gridNodes, int nodeNum, int3 imageRes, int iy)
 {
 	krSLAContouring_Initialization << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (tempImg, targetImg, gridNodes, nodeNum, imageRes, iy);
@@ -1431,7 +1457,36 @@ void LDNIcudaOperation::LDNISLAContouring_ThirdClassCylinder(double threshold, b
 
 
 }
+extern "C" void call_Filter5forSLA(bool *upperLayer,bool *lowerLayer, bool *tempImg, bool *upperSupt,bool *lowerSupt, unsigned int *linkIndex, int nodeNum, int3 imageRes, int layerNum,int flag)
+{
+	Filter5forSLA << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (upperLayer, lowerLayer, tempImg, upperSupt, lowerSupt, linkIndex, nodeNum, imageRes, layerNum,flag);
+}
+__global__ void Filter5forSLA(bool *upperLayer, bool *lowerLayer, bool *tempImg, bool *upperSupt, bool *lowerSupt, unsigned int *linkIndex, int nodeNum, int3 imageRes, int layerNum,int flag)
+{
+	int index = threadIdx.x + blockIdx.x*blockDim.x;
+	unsigned int ix, iz, id;
+	bool node, node2, node3;
+	while (index < nodeNum)
+	{
+		ix = index % imageRes.x;	iz = index / imageRes.x;
 
+		id = iz * imageRes.x+ ix;
+
+		node = tempImg[index];
+		if (node&&(flag==2))
+		{
+			atomicAdd(&linkIndex[index], 1);
+		}
+		if(layerNum == 2) node3 = false;
+		else node3 = upperSupt[id];
+
+		node2 = (node3 && !lowerLayer[id]);
+
+		lowerSupt[id] = node || node2;
+
+		index += blockDim.x * gridDim.x;
+	}
+}
 extern "C" void call_krSLAContouring_Filter5(bool *gridNodes, bool *tempImg, bool *suptNodes, unsigned int *linkIndex, int nodeNum, int3 imageRes, int iy)
 {
 	krSLAContouring_Filter5 << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (gridNodes, tempImg, suptNodes, linkIndex, nodeNum, imageRes, iy);
@@ -1773,6 +1828,33 @@ __global__ void krSLAContouring_InitializedDistanceMap(bool *seedNodes, short2 *
 	}
 }
 
+extern "C" void call_myFindAllLinks(unsigned int *linkIndex, unsigned int *linkLayerC, short *linkLayerD, short2 *linkID, bool *tempImg, unsigned int *count, int nodeNum, int3 imageRes,unsigned int iy)
+{
+	myFindAllLinks << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (linkIndex, linkLayerC, linkLayerD, linkID, tempImg, count, nodeNum, imageRes, iy);
+}
+__global__ void myFindAllLinks(unsigned int *linkIndex, unsigned int *linkLayerC, short *linkLayerD, short2 *linkID, bool *tempImg, unsigned int *count, int nodeNum, int3 imageRes,unsigned int iy)
+{
+	int index = threadIdx.x + blockIdx.x*blockDim.x;
+	unsigned int ix, iz, id, st;
+	bool node;
+
+	while (index < nodeNum)
+	{
+		ix = index % imageRes.x;	iz = index / imageRes.x;
+
+		if (tempImg[index])
+		{
+			id = atomicAdd(&count[iz*imageRes.x + ix], 1);
+			st = linkIndex[iz*imageRes.x + ix];
+
+			linkLayerC[st + id] = iy;
+			linkLayerD[st + id] = iy;
+			linkID[st + id] = make_short2(ix, iz);
+		}
+
+		index += blockDim.x * gridDim.x;
+	}
+}
 extern "C" void call_krSLAContouring_FindAllLinks(unsigned int *linkIndex, unsigned int *linkLayerC, short *linkLayerD, short2 *linkID, bool *tempImg, unsigned int *count, int nodeNum, int3 imageRes)
 {
 	krSLAContouring_FindAllLinks << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (linkIndex, linkLayerC, linkLayerD, linkID, tempImg, count, nodeNum, imageRes);
@@ -1807,6 +1889,45 @@ __global__ void krSLAContouring_FindAllLinks(unsigned int *linkIndex, unsigned i
 	}
 }
 
+extern "C" void call_myRelateAllLinksBetweenLayers(unsigned int *linkIndex, unsigned int *linkLayerC, bool *lowerLayer, bool *upperSupt, int nodeNum, int3 imageRes,int layerNum,unsigned int iy)
+{
+	myRelateAllLinksBetweenLayers << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (linkIndex, linkLayerC, lowerLayer, upperSupt, nodeNum, imageRes, layerNum, iy);
+}
+__global__ void myRelateAllLinksBetweenLayers(unsigned int *linkIndex, unsigned int *linkLayerC, bool *lowerLayer, bool *upperSupt, int nodeNum, int3 imageRes,int layerNum, unsigned int iy)
+{
+	int index = threadIdx.x + blockIdx.x*blockDim.x;
+	unsigned int ix, iz, id, s_id, st, num, i;
+	bool node, node2;
+
+	while (index < nodeNum) {
+
+		ix = index % imageRes.x;	
+		iz = index / imageRes.x;
+
+
+		s_id = iz * imageRes.x + ix; // Mark: could be error when iy+1 >= imageRes.y-1
+
+		if (layerNum==2) node2 = false;
+		else node2 = upperSupt[s_id];
+
+		if (node2 && !lowerLayer[index])
+		{
+			st = linkIndex[iz*imageRes.x + ix];
+			num = linkIndex[iz*imageRes.x + ix + 1] - st;
+
+			for (i = 0; i < num; i++)
+			{
+				id = atomicMin(&linkLayerC[st + i], iy);
+				//if (ix == 27 && iz == 48)
+				//	printf("?? %d %d %d %d \n", ix, iz, iy, id);
+			}
+
+		}
+
+		index += blockDim.x * gridDim.x;
+
+	}
+}
 extern "C" void call_krSLAContouring_RelateAllLinksBetweenLayers(unsigned int *linkIndex, unsigned int *linkLayerC, bool *gridNodes, bool *suptNodes, int nodeNum, int3 imageRes)
 {
 	krSLAContouring_RelateAllLinksBetweenLayers << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (linkIndex, linkLayerC, gridNodes, suptNodes, nodeNum, imageRes);
@@ -1847,6 +1968,31 @@ __global__ void krSLAContouring_RelateAllLinksBetweenLayers(unsigned int *linkIn
 	}
 }
 
+extern "C" void call_myVerticalSpptPxlProp(bool *lowerLayer, bool *upperSupt, bool *lowerSupt, int nodeNum, int3 imageRes)
+{
+	myVerticalSpptPxlProp << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (lowerLayer, upperSupt, lowerSupt, nodeNum, imageRes);
+}
+__global__ void myVerticalSpptPxlProp(bool *lowerLayer, bool *upperSupt,bool *lowerSupt, int nodeNum, int3 imageRes)
+{
+	int index = threadIdx.x + blockIdx.x*blockDim.x;
+	unsigned int ix, iz, id, prev_id, suptid;
+	bool node;
+
+	while (index < nodeNum)
+	{
+		ix = index % imageRes.x;
+		iz = index / imageRes.x;
+
+		id = iz * imageRes.x + ix;
+		//suptid = iz * imageRes.x*(imageRes.y - 1) + iy * imageRes.x + ix;
+		//prev_id = iz * imageRes.x*(imageRes.y - 1) + (iy + 1)*imageRes.x + ix;
+
+		if (upperSupt[id] && !lowerSupt[id] && !lowerLayer[id])
+			lowerSupt[id] = true;
+
+		index += blockDim.x * gridDim.x;
+	}
+}
 extern "C" void call_krFDMContouring_VerticalSpptPxlProp(bool *gridNodes, bool *suptNodes, int nodeNum, int3 imageRes, int iy)
 {
 	krFDMContouring_VerticalSpptPxlProp << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (gridNodes, suptNodes, nodeNum, imageRes, iy);
@@ -2337,7 +2483,89 @@ __global__ void krSLAContouring_ConnectionMapOnLayers(bool* gridNodes, bool* tem
 	}
 
 }
+__global__ void krSLAContouring_ConnectionMapOnLayers2(bool* upperLayer,bool* lowerLayer,int layerNum1, bool* tempImg, bool* linkMap, bool* bflagDelete, short2* linkID, int i, int j, int pixelNum, int lengthofLayer, int furtherStepLength, int layerNumforOneCircle, int endlayer, int startlayer, int3 imgRes, int nodeNum,int numofLayer)
+{
+	int index = threadIdx.x + blockIdx.x*blockDim.x;
+	int ix, iy, iz, m;
+	short2 st, ed;
+	int localID;
+	int layerID;
+	int norm;
+	st = linkID[i];
+	ed = linkID[j];
+	bool bflag = false;
 
+	while (index < nodeNum) {
+		ix = index % imgRes.x;	iz = index / imgRes.x;
+		//iz = (index / imgRes.x) % imgRes.y;
+		//iy = index / (imgRes.x*imgRes.y);
+		iy = layerNum1 - startlayer - 2;
+		if (iy<0 || iy>=numofLayer)break;
+		
+		layerID = startlayer + 2 + iy;
+		localID = iy % layerNumforOneCircle;
+		if (layerNumforOneCircle - localID > endlayer - layerID)
+		{
+			index += blockDim.x * gridDim.x;
+			//if (ix == 0 && iz == 0) printf("@@ %d %d %d %d %d %d\n", layerNumforOneCircle, localID, startlayer, endlayer, layerID, iy);
+			continue;
+		}
+
+		bflag = false;
+		if (linkMap[iz*imgRes.x + ix])//&& iy==4)
+		{
+			//norm = abs(iz - st.y) + abs(ix - st.x) - 1;
+			norm = abs(iz - ed.y) + abs(ix - ed.x) - 1;
+			//printf("3: %d %d %d %d %d -- %d %d %d\n", ix, iz, ed.x, ed.y, norm, localID, layerNumforOneCircle-1, pixelNum-1);
+
+			if (norm >= 0 && !((localID == layerNumforOneCircle - 1) && (norm > pixelNum - 1)))
+			{
+
+				if (norm >= localID * furtherStepLength && norm < localID*furtherStepLength + lengthofLayer)
+				{
+					tempImg[index] = true;
+					//printf("1: %d %d %d %d %d %d %d %d\n", norm, ix, iz, iy, localID, layerID, startlayer, endlayer);
+					bflag = true;
+				}
+				if (norm <= pixelNum - 1 - (localID*furtherStepLength) && norm > pixelNum - 1 - (localID*furtherStepLength + lengthofLayer))
+				{
+					tempImg[index] = true;
+					//printf("2: %d %d %d %d %d %d %d %d\n", norm, ix, iz, iy, st.x, st.y, ed.x, ed.y);
+					bflag = true;
+				}
+
+
+				if (bflag)
+				{				
+					if (lowerLayer[iz*imgRes.x + ix])
+					{
+						for (m = 1; m <= layerNumforOneCircle - localID - 1; m++)
+						{
+							bflagDelete[iy + m] = true;
+							//printf("delete %d %d %d %d %d \n", ix, iz, layerID, iy, iy+m);
+							//printf("delete %d \n", layerID);
+						}
+
+						for (m = iy; m >= iy - localID; m--)
+						{
+							bflagDelete[m] = true;
+							//printf("delete %d \n", layerID);
+						}
+					}
+					
+					
+				}
+
+			}
+		}
+
+
+
+
+		index += blockDim.x * gridDim.x;
+	}
+
+}
 __global__ void krSLAContouring_DeleteMapOnLayers(bool* tempImg, bool* bflagDelete, int layerNumforOneCircle, int2 imgRes, int nodeNum)
 {
 	int index = threadIdx.x + blockIdx.x*blockDim.x;
@@ -2347,6 +2575,30 @@ __global__ void krSLAContouring_DeleteMapOnLayers(bool* tempImg, bool* bflagDele
 	while (index < nodeNum) {
 		ix = index % imgRes.x;	iz = (index / imgRes.x) % imgRes.y;
 		iy = index / (imgRes.x*imgRes.y);
+
+		localID = iy % layerNumforOneCircle;
+		if (bflagDelete[iy] && tempImg[index])
+		{
+			tempImg[index] = false;
+		}
+
+		index += blockDim.x * gridDim.x;
+	}
+
+
+}
+__global__ void krSLAContouring_DeleteMapOnLayers2(bool* tempImg, bool* bflagDelete, int layerNumforOneCircle, int2 imgRes, int nodeNum,int layerNum1,int startlayer,int numofLayer)
+{
+	int index = threadIdx.x + blockIdx.x*blockDim.x;
+	int ix, iy, iz;
+	int localID;
+
+	while (index < nodeNum) {
+		ix = index % imgRes.x;	iz = index / imgRes.x;
+		//iz = (index / imgRes.x) % imgRes.y;
+		//iy = index / (imgRes.x*imgRes.y);
+		iy = layerNum1 - startlayer - 2;
+		if (iy<0 || iy>=numofLayer)break;
 
 		localID = iy % layerNumforOneCircle;
 		if (bflagDelete[iy] && tempImg[index])
@@ -2384,7 +2636,36 @@ __global__ void krSLAContouring_FilterLink2(bool* suptNodes, bool* tempImgs, int
 	}
 
 }
+__global__ void krSLAContouring_FilterLink22(bool* lowerSupt,int layerNum1, bool* tempImgs, int startlayer, int endlayer, int3 imgRes, int nodeNum,int numofLayer)
+{
+	int index = threadIdx.x + blockIdx.x*blockDim.x;
+	int ix, iy, iz;
+	int layerID;
 
+	while (index < nodeNum) {
+		ix = index % imgRes.x;	iz = index / imgRes.x;
+		//iz = (index / imgRes.x) % imgRes.y;
+		//iy = index / (imgRes.x*imgRes.y);
+		iy = layerNum1 - startlayer - 2;
+		if (iy<0 || iy>=numofLayer)break;
+		//layerID = iy + startlayer + 2;
+
+		
+		
+		if (!lowerSupt[iz*imgRes.x + ix] && tempImgs[index])
+		{
+			lowerSupt[iz*imgRes.x + ix] = true;
+			//if (iz == 191) printf("filter %d %d %d \n", ix, iy, iz);
+		}
+		
+		
+
+
+
+		index += blockDim.x * gridDim.x;
+	}
+
+}
 void LDNIcudaOperation::LDNISLAContouring_GenerateConnectionforCylinders(unsigned int *linkLayerC, short *linkLayerD,
 	short2 *linkID, bool *gridNodes, bool *&suptNodes, int imageSize[], int linkThreshold,
 	int lengthofLayer, int furtherStepLength, int linkNum, double nSampleWidth)
@@ -2511,7 +2792,132 @@ void LDNIcudaOperation::LDNISLAContouring_GenerateConnectionforCylinders(unsigne
 
 
 }
+void LDNIcudaOperation::LDNISLAContouring_GenerateConnectionforCylinders2(unsigned int *linkLayerC, short *linkLayerD,
+	short2 *linkID, bool *upperLayer,bool *lowerLayer, bool *&lowerSupt, int imageSize[], int linkThreshold,
+	int lengthofLayer, int furtherStepLength, int linkNum, double nSampleWidth,int layerNum1)
+{
+	int *linkCount;
+	bool *linkfilter;
 
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(linkCount), sizeof(unsigned int)));
+	CUDA_SAFE_CALL(cudaMemset((void*)linkCount, 0, sizeof(unsigned int)));
+
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(linkfilter), linkNum*linkNum * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)linkfilter, false, linkNum*linkNum * sizeof(bool)));
+
+	krSLAContouring_CounterLink1 << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (linkID, linkfilter, linkCount, linkNum*linkNum, linkNum, linkThreshold);
+
+	/*int *numofLink = (int*)malloc(sizeof(int));
+	CUDA_SAFE_CALL( cudaMemcpy( numofLink, linkCount, sizeof(int), cudaMemcpyDeviceToHost ) );
+
+	printf("num of link %d \n", numofLink[0]);*/
+
+	CUDA_SAFE_CALL(cudaMemset((void*)linkCount, 0, sizeof(unsigned int)));
+	krSLAContouring_FilterLink1 << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (linkID, linkLayerC, linkLayerD, linkCount, linkfilter, linkNum*linkNum, linkNum, linkThreshold, lengthofLayer, furtherStepLength);
+
+
+	int *numofLink = (int*)malloc(sizeof(int));
+	CUDA_SAFE_CALL(cudaMemcpy(numofLink, linkCount, sizeof(int), cudaMemcpyDeviceToHost));
+
+	printf("num of link %d \n", numofLink[0]);
+
+
+	bool *blink = (bool*)malloc(linkNum*linkNum * sizeof(bool));
+	CUDA_SAFE_CALL(cudaMemcpy(blink, linkfilter, linkNum*linkNum * sizeof(bool), cudaMemcpyDeviceToHost));
+	unsigned int *cpu_layerC = (unsigned int*)malloc(linkNum * sizeof(unsigned int));
+	CUDA_SAFE_CALL(cudaMemcpy(cpu_layerC, linkLayerC, linkNum * sizeof(unsigned int), cudaMemcpyDeviceToHost));
+	short *cpu_layerD = (short*)malloc(linkNum * sizeof(short));
+	CUDA_SAFE_CALL(cudaMemcpy(cpu_layerD, linkLayerD, linkNum * sizeof(short), cudaMemcpyDeviceToHost));
+
+
+	bool *linkMap;
+	bool *tempLayer;
+	bool *bflagLayer;
+	CUDA_SAFE_CALL(cudaMalloc((void**)&(linkMap), imageSize[0] * imageSize[2] * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)linkMap, false, imageSize[0] * imageSize[2] * sizeof(bool)));
+	CUDA_SAFE_CALL(cudaMemset((void*)linkCount, 0, sizeof(int)));
+
+	int m, n;
+	int *numofPixel = (int*)malloc(sizeof(int));
+	int st_layer, ed_layer, numofLayer;
+	int layerNumforOneCircle;
+	int time = clock();
+	for (int i = 0; i < linkNum*linkNum; i++)
+	{
+		if (blink[i])
+		{
+			m = i % linkNum;	n = i / linkNum;
+			numofPixel[0] = 0;
+
+
+			krSLAContouring_CalConnectionMap << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (linkID, m, n, linkMap, linkCount, imageSize[0] * imageSize[2], make_int2(imageSize[0], imageSize[2]), nSampleWidth);
+
+
+			krSLAContouring_CheckConnectionMap << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (linkID, m, n, linkMap, linkCount, imageSize[0] * imageSize[2], make_int2(imageSize[0], imageSize[2]));
+
+			thrust::device_ptr<bool> target_ptr(linkMap);
+			numofPixel[0] = thrust::count(target_ptr, target_ptr + (imageSize[0] * imageSize[2]), 1);
+
+
+
+
+			numofPixel[0] = numofPixel[0] - 2 - 1;
+
+
+
+			if (numofPixel[0] > lengthofLayer)
+			{
+
+				st_layer = cpu_layerC[m] >= cpu_layerC[n] ? cpu_layerC[m] : cpu_layerC[n];
+				ed_layer = cpu_layerD[m] <= cpu_layerD[n] ? cpu_layerD[m] : cpu_layerD[n];
+				numofLayer = abs(st_layer - ed_layer) + 1 - 2 - 1; // if(this->layerind<startinglayer+2 || this->layerind>= endinglayer)
+
+
+
+				CUDA_SAFE_CALL(cudaMalloc((void**)&(tempLayer), imageSize[0] * imageSize[2] * sizeof(bool)));
+				CUDA_SAFE_CALL(cudaMemset((void*)tempLayer, false, imageSize[0] * imageSize[2] * sizeof(bool)));
+				CUDA_SAFE_CALL(cudaMalloc((void**)&(bflagLayer), numofLayer * sizeof(bool)));
+				CUDA_SAFE_CALL(cudaMemset((void*)bflagLayer, false, numofLayer * sizeof(bool)));
+
+
+				layerNumforOneCircle = (numofPixel[0] - (lengthofLayer - 1) + 1) / furtherStepLength + 1;
+
+				int ccc = thrust::count(target_ptr, target_ptr + (imageSize[0] * imageSize[2]), 1);
+				//printf("num of pixel %d %d %d %d \n", numofPixel[0],numofLayer, layerNumforOneCircle, ccc);
+
+				krSLAContouring_ConnectionMapOnLayers2 << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (upperLayer, lowerLayer, layerNum1, tempLayer, linkMap, bflagLayer, linkID, m, n, numofPixel[0], lengthofLayer, furtherStepLength, layerNumforOneCircle, ed_layer, st_layer, make_int3(imageSize[0], imageSize[2], imageSize[1]), imageSize[0] * imageSize[2], numofLayer);
+				krSLAContouring_DeleteMapOnLayers2 << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (tempLayer, bflagLayer, layerNumforOneCircle, make_int2(imageSize[0], imageSize[2]), imageSize[0] * imageSize[2], layerNum1, st_layer, numofLayer);
+				krSLAContouring_FilterLink22 << <BLOCKS_PER_GRID, THREADS_PER_BLOCK >> > (lowerSupt, layerNum1, tempLayer, st_layer, ed_layer, make_int3(imageSize[0], imageSize[2], imageSize[1] - 1), imageSize[0] * imageSize[2], numofLayer);
+
+				/**/
+				cudaFree(bflagLayer);
+				cudaFree(tempLayer);
+
+				//break;
+			}
+
+			CUDA_SAFE_CALL(cudaMemset((void*)linkMap, false, imageSize[0] * imageSize[2] * sizeof(bool)));
+			CUDA_SAFE_CALL(cudaMemset((void*)linkCount, 0, sizeof(int)));
+		}
+
+	}
+	std::cout << "Connection Time (micro second) for " << layerNum1 << "-th layer:" << float(clock() - time) / CLOCKS_PER_SEC << std::endl;
+
+
+
+	cudaFree(linkMap);
+	cudaFree(linkfilter);
+	cudaFree(linkCount);
+
+	free(numofLink);
+	free(blink);
+	free(cpu_layerC);
+	free(cpu_layerD);
+	free(numofPixel);
+
+
+}
 
 void call_func::setdev_ptr(unsigned int* LinkIndex, int nodeNum, unsigned int& LinkNum)
 {
